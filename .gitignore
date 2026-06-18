@@ -1,0 +1,11 @@
+# PDFs sources (sujet, grille, présentation) — non versionnés
+/*.pdf
+test_data/
+__pycache__/
+*.pyc
+.DS_Store
+*.tmp
+venv/
+.venv/
+*.egg-info/
+local_output/

@@ -1,0 +1,4 @@
+pyspark==3.5.0
+pandas==2.1.4
+pyarrow==14.0.2
+faker==22.0.0
