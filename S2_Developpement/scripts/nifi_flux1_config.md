@@ -8,17 +8,61 @@ des transactions bancaires depuis PostgreSQL vers HDFS.
 
 ## Flow NiFi — Vue d'ensemble
 
+Deux variantes selon l'environnement :
+
+**Variante A — Production (QueryDatabaseTableRecord, mode incrémental) :**
 ```
 [QueryDatabaseTableRecord] → [UpdateAttribute] → [PutHDFS]
          ↓ (failure)
    [LogAttribute] → [PutFile (dead-letter)]
 ```
 
+**Variante B — TP / Dev (ExecuteSQL + ConvertRecord, comme dans le TP NiFi fourni) :**
+```
+[ExecuteSQL] → [ConvertRecord] → [UpdateAttribute] → [PutHDFS]
+     ↓ (failure)                         ↓ (failure)
+[LogAttribute] → [PutFile (DLQ)]   [LogAttribute]
+```
+
 ---
 
-## Processor 1 — QueryDatabaseTableRecord
+## Variante B — Processors (version TP NiFi)
 
-**Rôle** : Exécute une requête JDBC sur PostgreSQL et produit un FlowFile au format Parquet.
+### Processor 1 — ExecuteSQL
+
+**Rôle** : Exécute une requête SQL et produit un FlowFile au format **Avro**.
+
+| Propriété | Valeur |
+|-----------|--------|
+| Database Connection Pooling Service | `DBCPConnectionPool-PostgreSQL` |
+| SQL select query | `SELECT * FROM transactions WHERE DATE(date_heure) = '${now():format('yyyy-MM-dd')}'` |
+| Scheduling | Run Schedule: `0 30 6 * * ?` |
+
+### Processor 2 — ConvertRecord
+
+**Rôle** : Convertit le FlowFile Avro en Parquet (ou CSV pour le TP).
+
+| Propriété | Valeur |
+|-----------|--------|
+| Record Reader | `AvroReader` |
+| Record Writer | `ParquetRecordSetWriter` (production) ou `CSVRecordSetWriter` (TP) |
+
+### DBCPConnectionPool — Configuration JDBC (commune aux deux variantes)
+
+| Propriété | Valeur |
+|-----------|--------|
+| Database Connection URL | `jdbc:postgresql://postgres:5432/bankdb` *(Docker)* ou `jdbc:postgresql://pg-findata.internal:5432/findata_db` *(prod)* |
+| Database Driver Class Name | `org.postgresql.Driver` |
+| Database Driver Location(s) | `/opt/nifi/drivers/postgresql-42.7.0.jar` |
+| Database User | `admin` *(Docker)* / `findata_nifi_reader` *(prod)* |
+| Password | *(via NiFi Sensitive Properties Key ou HashiCorp Vault)* |
+| Max Total Connections | `8` |
+
+---
+
+## Variante A — Processor 1 — QueryDatabaseTableRecord (production)
+
+**Rôle** : Mode incrémental — mémorise la dernière valeur de `transaction_id` lue pour n'extraire que les nouvelles lignes à chaque exécution.
 
 | Propriété | Valeur |
 |-----------|--------|
@@ -31,17 +75,6 @@ des transactions bancaires depuis PostgreSQL vers HDFS.
 | Fetch Size | `10000` |
 | Max Rows Per Flow File | `100000` |
 | Scheduling | Run Schedule: `0 30 6 * * ?` (CRON — tous les jours à 06h30) |
-
-### DBCPConnectionPool — Configuration JDBC
-
-| Propriété | Valeur |
-|-----------|--------|
-| Database Connection URL | `jdbc:postgresql://pg-findata.internal:5432/findata_db` |
-| Database Driver Class Name | `org.postgresql.Driver` |
-| Database Driver Location(s) | `/opt/nifi/lib/postgresql-42.7.0.jar` |
-| Database User | `findata_nifi_reader` |
-| Password | *(via NiFi Sensitive Properties Key ou HashiCorp Vault)* |
-| Max Total Connections | `8` |
 
 ### ParquetRecordSetWriter — Configuration
 

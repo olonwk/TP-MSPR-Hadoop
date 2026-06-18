@@ -1,0 +1,136 @@
+version: '3.8'
+
+# ============================================================
+# Docker Compose — Environnement local FinData / DEPE855
+# Réseau : datalake-net (identique au TP NiFi fourni)
+#
+# Services :
+#   - postgres   : Source transactionnelle (bankdb)
+#   - nifi       : Ingestion PostgreSQL → HDFS (Flux 1)
+#                  Collecte logs → Kafka (Flux 3)
+#   - zookeeper  : Coordination Kafka
+#   - kafka      : Bus de messages (topic findata.logs.raw)
+#   - kafka-ui   : Interface web pour inspecter les topics Kafka
+#
+# Usage :
+#   docker compose up -d
+#   NiFi UI : https://localhost:8443/nifi   (admin / Admin12345678)
+#   Kafka UI : http://localhost:8080
+# ============================================================
+
+networks:
+  datalake-net:
+    name: datalake-net
+    driver: bridge
+
+volumes:
+  postgres_data:
+  nifi_data:
+  nifi_logs:
+  zookeeper_data:
+  kafka_data:
+
+services:
+
+  # ── PostgreSQL 16 — Source bancaire ─────────────────────────────────────
+  postgres:
+    image: postgres:16
+    container_name: postgres
+    networks:
+      - datalake-net
+    environment:
+      POSTGRES_USER: admin
+      POSTGRES_PASSWORD: admin123
+      POSTGRES_DB: bankdb
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./init_postgres.sql:/docker-entrypoint-initdb.d/01_init.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U admin -d bankdb"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # ── Apache NiFi 1.28.1 — Ingestion (Flux 1 + Flux 3) ───────────────────
+  nifi:
+    image: apache/nifi:1.28.1
+    container_name: nifi
+    networks:
+      - datalake-net
+    ports:
+      - "8443:8443"
+    environment:
+      SINGLE_USER_CREDENTIALS_USERNAME: admin
+      SINGLE_USER_CREDENTIALS_PASSWORD: Admin12345678
+      NIFI_JVM_HEAP_INIT: 1g
+      NIFI_JVM_HEAP_MAX: 2g
+    volumes:
+      - nifi_data:/opt/nifi/nifi-current/data
+      - nifi_logs:/opt/nifi/nifi-current/logs
+      # Dossier partagé pour PutFile (sortie CSV locale, comme dans le TP)
+      - ./output:/opt/nifi/output
+      # Driver JDBC PostgreSQL (à déposer dans ce dossier avant démarrage)
+      - ./drivers:/opt/nifi/drivers
+    depends_on:
+      postgres:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # ── Zookeeper — Coordination Kafka ──────────────────────────────────────
+  zookeeper:
+    image: bitnami/zookeeper:3.8
+    container_name: zookeeper
+    networks:
+      - datalake-net
+    environment:
+      ALLOW_ANONYMOUS_LOGIN: "yes"
+    volumes:
+      - zookeeper_data:/bitnami/zookeeper
+    restart: unless-stopped
+
+  # ── Apache Kafka 3.6 — Bus de messages Flux 3 ───────────────────────────
+  kafka:
+    image: bitnami/kafka:3.6
+    container_name: kafka
+    networks:
+      - datalake-net
+    ports:
+      - "9092:9092"
+    environment:
+      KAFKA_CFG_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_CFG_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_CFG_LISTENERS: PLAINTEXT://0.0.0.0:9092
+      KAFKA_CFG_AUTO_CREATE_TOPICS_ENABLE: "false"
+      KAFKA_CFG_NUM_PARTITIONS: 4
+      KAFKA_CFG_DEFAULT_REPLICATION_FACTOR: 1
+    volumes:
+      - kafka_data:/bitnami/kafka
+    depends_on:
+      - zookeeper
+    healthcheck:
+      test: ["CMD-SHELL", "kafka-topics.sh --bootstrap-server localhost:9092 --list"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+    restart: unless-stopped
+
+  # ── Kafka UI — Interface web d'inspection ───────────────────────────────
+  kafka-ui:
+    image: provectuslabs/kafka-ui:latest
+    container_name: kafka-ui
+    networks:
+      - datalake-net
+    ports:
+      - "8080:8080"
+    environment:
+      KAFKA_CLUSTERS_0_NAME: findata-local
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:9092
+    depends_on:
+      kafka:
+        condition: service_healthy
+    restart: unless-stopped
